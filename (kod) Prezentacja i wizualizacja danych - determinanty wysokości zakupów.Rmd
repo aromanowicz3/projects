@@ -1,0 +1,392 @@
+---
+title: "PWD_raport"
+author: "Aleksandra Romanowicz"
+date: "24 stycznia 2018"
+output: html_document
+---
+
+#Zakupy w Black Friday
+##Raport przygotowany na zajęcia Prezentacja i Wizualizacja Danych 
+###Źródło danych i cel projektu
+W pierwszym kroku zostaną wczytane dane pochodzące z https://www.kaggle.com/mehdidag/black-friday.
+
+Zbiór zawiera informacje o zakupionych kategoriach produktów i cechach osób kupujących - 537 577 transakcji dokonanych przez 5 891 użytkowników. Zawarte zmiene to:  
+- User_ID - ID użytkownika, który dokonał zakupu,  
+- Product_ID - ID zakupionego produktu,  
+- Gender - płeć kupującego, przyjmuje wartości F i M,  
+- Age - wiek kupującego, zmienna kategoryzująca przyjmująca 7 poziomów,  
+- Occupation - zawód kupującego, zmienna kategoryzująca przyjmująca 21 poziomów; niestety w danych źródłowych nie ujawniono informacji, co kryje się pod poszczególnymi kategoriami,  
+- City_Category - kategoria miasta kupującego, zmienna przyjmuje 3 poziomy (A, B i C); niestety w danych źródłowych nie ujawniono informacji, co kryje się pod poszczególnymi kategoriami,  
+- Stay_In_Current_City_Years - liczba lat, od ilu kupujący mieszka w obecnym mieście, zmienna kategoryzująca przyjmująca 5 poziomów,  
+- Marital_Status - stan cywilny, zmienna przyjmuje wartość 0 lub 1,  
+- Product_Category_1, Product_Category_2, Product_Category_3 - kategoria kupowanego produktu, danemu ID produktu odpowiada jedna kombinacja tych trzech parametrów; niestety w danych źródłowych nie ujawniono informacji, co kryje się pod poszczególnymi kategoriami,  
+- Purchase - wydana kwota w dolarach.  
+  
+Celem analizy jest zdefiniowanie cech użytkowników, które wpływają na wysokość dokonywanych zakupów.  
+  
+###Wstępna analiza danych
+
+
+```{r wczytanie_danych}
+rm(list=ls())
+d<-read.csv('C:/Users/Aleksandra Romanowic/Downloads/black-friday/BlackFriday.csv', header=TRUE, sep=",")
+str(d)
+
+```
+
+Po wczytaniu zmieniamy typy zmiennych Occupation oraz Purchase odpowiednio na factor oraz numeric.
+```{r zmiana_typow}
+d$Occupation <- factor(d$Occupation)
+d$Purchase <- as.numeric(as.character(d$Purchase))
+```
+
+Każdy z rekordów to zakup danego towaru przez danego użytkownika - w celu zanalizowania danych zagregowanych stworzono tabele pomocnicze przypisujące do użytkownika jego parametry (m.in. wiek, miasto, suma wydanych pieniędzy), a także tabela przypisująca parametry do danego produktu - jego kod kategorii oraz sumaryczną kwotę wydanych przez kupujących pieniędzy. Dla łatwiejszej prezentacji danych, kwoty sumaryczne zostaną wyrażone w tysiącach dolarów (w dokumentacji zbioru danych nie zostało określone, jakiego typu są to produkty, stąd wysokość zakupów może dziwić, ale nie uniemożliwia przeprowadzenia analizy).
+
+
+```{r include=FALSE}
+library(sqldf)
+library(pROC)
+library(caret)
+library(rattle)
+library(rpart)
+library(rpart.plot)
+```
+```{r d_modification}
+
+d_userInfo <- sqldf('SELECT User_ID, Gender, Age, Occupation, City_Category, Stay_In_Current_City_Years, Marital_Status, sum(Purchase)/1000 as PurchasePerUserK from d group by User_ID')
+d_productInfo <- sqldf('SELECT Product_ID, Product_Category_1, Product_Category_2, Product_Category_3, sum(Purchase)/1000 as PurchasePerProductK from d group by Product_ID')
+
+```
+Przed dalszą analizą warto sprawdzić, co oznacza zmienna Marital_Status, która nie została w pełni objaśniona dla danych źródłowych. Z wcześniejszego podsumowania wiemy, że przyjmuje ona wartości 0 i 1, prawdopodobnie w zależności od tego, czy użytkownik jest w związku małżeńskim.
+
+```{r marStatus_summary}
+summary(d_userInfo$Marital_Status)
+```
+W całej grupie użytkowników, dla 42% użytkowników zmienna Marital_Status przyjęła wartość 1. Sprawdźmy, jak to wygląda w grupie osób poniżej 17 roku życia:
+```{r marStatus_inf}
+summary(d_userInfo[d_userInfo$Age=='0-17',]$Marital_Status)
+```
+W tej grupie dla 100% użytkowników zmienna Marital_Status przyjmuje wartość 0. Mamy prawo założyć, że wartość 1 oznacza osoby, które weszły w związek małżeński.  
+  
+Dzięki zabiegowi agregującemu dane łatwo jest dostrzec pierwsze wnioski w zadanym zbiorze danych, np. wykres kołowy prezentujący strukturę kupujących według płci (dla wszystkich zawartych transakcji) prezentuje się w następujący sposób:
+
+```{r wykres1}
+pie(table(d$Gender), col=c('gray16', 'goldenrod1'), labels=c("Kobiety", "Mężczyźni"))
+```
+  
+Biorąc pod uwagę wszystkie transakcje, co czwarty kupujący jest kobietą (a ściślej - co czwarty produkt został kupiony przez kobietę).  
+  
+Analogiczny wykres dla zagregowanych danych o kupujących (w zbiorze, w którym każdy użytkownik występuje tylko raz niezależnie od liczby transakcji) prezentuje się następująco:
+```{r wykres2}
+pie(table(d_userInfo$Gender), col=c('gray16', 'goldenrod1'), labels=c("Kobiety", "Mężczyźni"))
+```
+  
+Zwiększony udział kobiet w grupie kupujących może prowadzić do pierwszego wniosku, że mężczyźni są większą grupą kupujących oraz, że kupują więcej (większą liczbę produktów per użytkownik).
+Nie można jeszcze wnioskować nic o ilości wydawanych pieniędzy.  
+  
+W kolejnym kroku warto zobaczyć, jak prezentują się wydatki w poszczególnych grupach.
+
+```{r wydatki_hist}
+par(mfrow=c(1,2))
+
+hist(d_userInfo[d_userInfo$Gender=="F",]$PurchasePerUserK, main="Wydatki kobiet", xlab= 'Wydatki per użytkownik [kUSD]', ylab = "Liczba użytkowników", col = 'gray16', ylim=c(0,1000) )
+
+
+hist(d_userInfo[d_userInfo$Gender=="M",]$PurchasePerUserK, main="Wydatki mężczyzn", xlab= 'Wydatki per użytkownik [kUSD]', ylab = "Liczba użytkowników", col = 'goldenrod1' )
+
+```
+  
+W obu grupach wydatki wydają się mieć podobny rozkład - najwięcej osób kupuje za najniższą sumaryczną kwotę i wraz ze wzrostem poziomu wydatków, maleje liczba osób w grupie.
+  
+Porównajmy jeszcze wykresy gęstości:
+```{r wydatki_den}
+plot(density(d_userInfo[d_userInfo$Gender=="M",]$PurchasePerUserK),
+     main="Wydatki według płci", 
+     xlab= 'Wydatki per użytkownik [kUSD]',
+     ylab = "Gęstość", 
+     col = 'goldenrod1',
+     lwd=3,
+     ylim=c(0,0.0015))
+
+
+lines(density(d_userInfo[d_userInfo$Gender=="F",]$PurchasePerUserK), col = 'gray16', lwd=2)
+
+legend("topright", 
+       fill=c("gray16", "goldenrod1"), 
+       legend = c("Kobiety", "Mężczyźni")) 
+
+```
+  
+Z wykresu możemy odczytać, że wydatki kobiet są bardziej skupione wokół jednej wartości, a wydatki mężczyzn są relatywnie bardziej zróżnicowane.
+
+```{r gender_boxplot}
+plot(d_userInfo$Gender, d_userInfo$PurchasePerUserK, xlab = 'Płeć', ylab='Wydatki per użytkownik [kUSD]', col='cyan4', ylim = c(0,11000), main = 'Wydatki według płci')
+```
+  
+Wśród kobiet obserwuje się niższą medianę wydatków oraz wartość minimalną. Zgodnie z histogramami i wykresem gęstości, różnica między pierwszym i trzecim kwartylem również jest widocznie niższa niż w grupie mężczyzn (co potwierdza poniższe podsumowanie):
+
+```{r gender2}
+summary(d_userInfo[d_userInfo$Gender=="F",]$PurchasePerUserK)
+summary(d_userInfo[d_userInfo$Gender=="M",]$PurchasePerUserK)
+
+```
+Następnie przyjrzyjmy się rozkładowi wydatków w poszczególnych grupach zawodowych
+```{r occupation_plot}
+
+plot(d_userInfo$Occupation, d_userInfo$PurchasePerUserK, xlab = 'Grupa zawodowa', ylab='Wydatki per użytkownik [kUSD]', col='cyan4', ylim = c(0,11000), main = 'Wydatki według grup zawodowych')
+
+
+```
+  
+Grupy zawodowe cechują się zbliżoną medianą oraz dolnym kwartylem wydatków. W niemal każdej z grup można zaobserwować liczne obserwacje odstające.
+
+```{r city_plot}
+plot(d_userInfo$City_Category, d_userInfo$PurchasePerUserK, xlab = 'Kategoria miasta', ylab='Wydatki per użytkownik [kUSD]', col='cyan4', ylim = c(0,11000), main = 'Wydatki według kategorii miasta')
+```
+  
+Poza większą liczbą obserwacji odstających, grupy miast A i B nie różnią się znacząco pod względem wydatków na użytkownika. W grupie C obserwowane jest znaczne zmniejszenie różnicy między wartością maksymalną i minimalną wydatków, a także między pierwszym i trzecim kwartylem, co świadczy o zbliżeniu wartości wydatków dla kolejnych użytkowników do mediany. 
+
+
+```{r city_summary}
+summary(d_userInfo[d_userInfo$City_Category=="A",]$PurchasePerUserK)
+summary(d_userInfo[d_userInfo$City_Category=="B",]$PurchasePerUserK)
+summary(d_userInfo[d_userInfo$City_Category=="C",]$PurchasePerUserK)
+
+```
+
+```{r stayinCity}
+
+plot(d_userInfo$Stay_In_Current_City_Years, d_userInfo$PurchasePerUserK, xlab = 'Zamieszkały w obecnym mieście od:', ylab='Wydatki per użytkownik [kUSD]', col='cyan4', ylim = c(0,11000), main = 'Wydatki według długości pobytu w obecnym miejscu zamieszkania')
+```
+  
+###Analiza czynników determinujących wysokość zakupów
+####Regresja liniowa
+Po wstępnej wizualizacji danych sprzedażowych postanowiłam zbadać czynniki wpływające na wysokość zakupów dokonywanych przez użytkownika tworząc model regresji liniowej. Zaczęłam od wszystkich zmiennych dostępnych w zbiorze.
+
+
+
+```{r m1}
+#colnames(d_userInfo)
+
+m1 <- lm(PurchasePerUserK ~ Age + Stay_In_Current_City_Years + Occupation + Marital_Status + Gender + City_Category, 
+          data=d_userInfo)
+
+summary(m1)
+
+```
+Model nie wyjaśnia modelu w wysokim stopniu - większość zmiennych jest nieistotna statystycznie z p-value na poziomie 5%, a skorygowane R^2 wynosi 16,34% (16% zmienności modelu zostało wyjaśnione przez wybrane zmienne objaśniające).  
+  
+Spróbujmy z innym modelem - usuwam zmienną Maritial_Status oraz Stay_In_Current_City_Years (wszystkie ich kategorie są nieistotne).
+```{r m2}
+
+m2 <- lm(PurchasePerUserK ~ Age  + Occupation  + Gender + City_Category, 
+          data=d_userInfo)
+
+summary(m2)
+
+```
+Uzyskałam niewielką poprawę skorygowanego R^2 (do 16,37%).  
+Wydaje się, że zmienna Age może przyjmować różne oszacowania w zależności od płci kupującego. Sprawdźmy jeszcze trzeci model:
+
+```{r m3}
+
+
+m3 <- lm(PurchasePerUserK ~ Age + Occupation + Gender + City_Category + Age*Gender, 
+          data=d_userInfo)
+
+summary(m3)
+
+```
+Model niestety nie uległ poprawie (skorygowane R^2 = 16,35%), w dodatku nowostworzone zmienne są nieistotne.  
+  
+Sprawdźmy, czy reszty modelu m2 (wybranego jako najlepiej dopasowanego) mają rozkład normalny.
+
+```{r reszty_m2}
+reszty = residuals(m2)
+hist(reszty, prob=TRUE, ylim=c(0,0.0008), main='Histogram reszt', ylab='Gęstość', xlab='reszty')
+lines(density(reszty), col="goldenrod1", lwd=2)
+```
+  
+Rozkład jest zbliżony do normalnego.  
+  
+Jak widać analiza czynników wplywających na wysokość zakupów poszczególnych użytkowników nie jest zbyt dokładna - jedynie 16% zmienności udało się wyjaśnić. Nie wszystkie zmienne są istotne statystycznie, stąd oszacowania parametrów mogą być przeszacowane lub niedoszacowane. Ze zmiennych istotnych nasilniejszym wpływem cechuje się zmienna odpowiadająca za kategorię C miasta - użytkownicy w tych miast wydawali nawet 697.97 tys. mniej. Drugim silnym wpływem jest płeć - mężczyźni wydają o 239 tys. więcej. Pozostałe zmienne istotne to trzy kategorie zawodów - 12, 16 oraz 17.
+  
+  
+####Regresja logistyczna
+Sprobuję podejść do problemu w inny sposób i podzielić użytkownikóW na robiących większe i mniejsze zakupy (na podstawie mediany w grupie) 
+
+```{r largePurchase_class}
+medianPurchase <- median(d_userInfo$PurchasePerUserK, na.rm=FALSE)
+d_userInfo$largePurchase <- 2
+d_userInfo$largePurchase[d_userInfo$PurchasePerUserK>=medianPurchase] <-1
+d_userInfo$largePurchase[d_userInfo$PurchasePerUserK<medianPurchase] <-0
+summary(d_userInfo$largePurchase)
+```
+Każdemu użytkownikowi udało się przyporządkować zmienną zero-jedynkową largePurchase (1 dla zakupów powyżej mediany w grupie). Dla zmiennej zero-jedynkowej możemy przeprowadzić regresję logistyczną. W tym celu dzielimy zbiór na treningowy i testowy:
+
+```{r podział zbioru d_userInfo na treningowy i testowy}
+set.seed(1456) 
+s <- sample.int(nrow(d_userInfo), floor(0.75*nrow(d_userInfo)), replace= FALSE)
+d_userInfo.train<- d_userInfo[s,]
+d_userInfo.test<-d_userInfo[-s,] 
+```
+
+```{r podział zbioru d na treningowy i testowy}
+set.seed(1456) 
+s <- sample.int(nrow(d), floor(0.75*nrow(d)), replace= FALSE)
+d.train<- d[s,]
+d.test<-d[-s,] 
+```
+
+```{r glm1}
+
+glm1 <- glm(largePurchase ~ Age + Stay_In_Current_City_Years + Occupation + Marital_Status + Gender + City_Category, 
+          data=d_userInfo.train,
+          family= binomial)
+summary(glm1)
+```
+  
+Modele logistyczne będziemy porównywać pod względem kryterium informacyjnego Akaike, AIC (im niższa wartość, tym model jest lepiej dopasowany).  
+Podobnie jak w modelach liniowych, zmienna Marital_Status oraz Stay_In_Current_City_Years są nieistotne statystycznie we wszystkich kategoriach. Usuwamy je z modelu:
+
+```{r glm2}
+
+glm2 <- glm(largePurchase ~ Age  + Occupation  + Gender + City_Category, 
+          data=d_userInfo.train,
+          family= binomial)
+summary(glm2)
+```
+  
+Spróbujemy, podobnie jak ostatnio, sprawdzić również korelacje zmiennych płeć i wiek.
+
+
+```{r glm3}
+
+glm3 <- glm(largePurchase ~ Age  + Occupation  + Gender + City_Category + Age*Gender, 
+          data=d_userInfo.train,
+          family= binomial)
+summary(glm3)
+```
+Jak dotąd drugi model jest najlepiej dopasowany do danych, sprawdźmy jak modele radzą sobie z prognozowaniem.
+
+```{r glm1 prognozy}
+predict.glm_1 <- predict(glm1, newdata=d_userInfo.test, type = "response") 
+predict.glm1 <- predict.glm_1
+predict.glm1[predict.glm_1>0.5] <-1
+predict.glm1[predict.glm_1<=0.5] <-0
+```
+Tworzymy tablicę pomyłek (confusion matrix), która wskazuje, jak wiele wartości 0 i 1 zostało prawidłowo przewidzianych:
+```{r glm1 confMat}
+conf.matrix.glm1 <- confusionMatrix(table(predict.glm1, as.numeric(d_userInfo.test$largePurchase)))
+conf.matrix.glm1$table
+```
+Prawidłowo przewidziano 487 "zer" oraz 435 "jedynek". Wartości fałszywie pozytywnych i fałszywie negatywnych było odpowiednio 310 i 241.  
+Rysujemy krzywą ROC
+```{r glm1 roc}
+roc.glm1 <- roc(as.numeric(d_userInfo.test$largePurchase),predict.glm1, direction="<")
+plot(roc.glm1,col="blue", lwd=1, main="Model logistyczny nr 1")
+```
+  
+Te same operacje wykonujemy dla modelu 2.
+```{r glm2 prognozy}
+predict.glm_2 <- predict(glm2, newdata=d_userInfo.test, type = "response") 
+predict.glm2 <- predict.glm_2
+predict.glm2[predict.glm_2>0.5] <-1
+predict.glm2[predict.glm_2<=0.5] <-0
+```
+
+```{r glm2 confMat}
+conf.matrix.glm2 <- confusionMatrix(table(predict.glm2, as.numeric(d_userInfo.test$largePurchase)))
+conf.matrix.glm2$table
+```
+  
+Względem modelu 1 zmniejszyła się liczba fałszywie pozytywnych wartości.
+```{r glm2 roc}
+roc.glm2 <- roc(as.numeric(d_userInfo.test$largePurchase),predict.glm2, direction="<")
+plot(roc.glm2,col="green", lwd=1, main="Model logistyczny nr 2")
+```
+  
+Kolejna iteracja - model 3.
+```{r glm3 prognozy}
+predict.glm_3 <- predict(glm3, newdata=d_userInfo.test, type = "response") 
+predict.glm3 <- predict.glm_3
+predict.glm3[predict.glm_3>0.5] <-1
+predict.glm3[predict.glm_3<=0.5] <-0
+```
+
+```{r glm3 confMat}
+conf.matrix.glm3 <- confusionMatrix(table(predict.glm3, as.numeric(d_userInfo.test$largePurchase)))
+conf.matrix.glm3$table
+```
+
+```{r glm3 roc}
+roc.glm3 <- roc(as.numeric(d_userInfo.test$largePurchase),predict.glm3, direction="<")
+plot(roc.glm3,col="red", lwd=1, main="Model logistyczny nr 3")
+```
+  
+Nanieśmy wszystkie krzywe na jeden wykres w celu znalezienia najlepiej dopasowanego modelu.
+```{r roc_comp}
+plot(roc.glm3,col="red", lwd=0.1, main="Model logistyczny - porównanie")
+lines(roc.glm1, col="green", lwd=0.1)
+lines(roc.glm1, col="blue", lwd=0.1)
+legend("bottomright", 
+       fill=c("red", "green", "blue"), 
+       legend = c("Model nr 3", "Model nr 2", "Model nr 1")) 
+```
+  
+Niestety modele są bardzo zbliżone - musimy wspomóc się wyliczonymi statystykami.
+```{r auc}
+roc1 <- auc(roc.glm1)
+roc2 <- auc(roc.glm2)
+roc3 <- auc(roc.glm3)
+
+cat("Wielkość pola pod krzywą (AUC) dla modelu 1 wynosi: ", roc1, "\n") 
+cat("Wielkość pola pod krzywą (AUC) dla modelu 2 wynosi: ", roc2, "\n")
+cat("Wielkość pola pod krzywą (AUC) dla modelu 3 wynosi: ", roc3, "\n")
+```
+  
+Najlepszym dopasowaniem cechuje się model nr 3 - pole pod krzywą jest najwyższe. Zinterpretujmy jego parametry:
+  
+  
+```{r m3_interpretacja}
+exp(cbind(Odd_Ratio = coef(glm3), confint(glm3)))
+```
+Istotnymi statystycznie zmiennymi była tylko płeć i kategoria miasta. Mężczyźni według tego modelu są o 128% bardziej skłonni dokonać dużych zakupów (czyli powyżej mediany dla grupy) niż kobiety przy innych czynnikach stałych. Kategoria B miasta zwiększa prawdopodobieństwo zrobienia dużych zakupów przez kobietę o 22% względem kobiety z kategorii miast A, a przez mężczyznę o 50% (względem mężczyzny z kategorii A). Osoby z kategorii miasta C są z kolei mniej skłonne do zrobienia dużych zakupów - kobiety o 58%, a mężczyźni o 132% względem miasta A.
+
+
+####Drzewo decyzyjne
+Pobocznym problemem biznesowym, który można spróbować rozwiązać korzystając z tego zbioru danych jest hipotetyczna sytuacja, gdzie prowadzący sklep internetowy nie może ze 100% pewnością zweryfikować wieku użytkownika, a chciałby dostarczyć mu różne treści w zależności od grupy wiekowej (sytuacja może nastąpić, gdy wiek jest zmienną deklaratywną, niepopartą żadnym dokumentem).  Wówczas na podstawie pozostałych parametrów można spróbować określić, do jakiej kategorii należy przypisać konsumenta.
+  
+```{r dec_tree}
+
+
+model.dt <- rpart(Age ~ largePurchase + Gender + Stay_In_Current_City_Years + Occupation + Marital_Status  + City_Category, data=d_userInfo.train)
+rpart.plot(model.dt)
+
+```
+  
+Jedynymi zmiennymi, które algorytm wziął pod uwagę jest zawód użytkownika. Kategoria zawodu nr 10 przyporządkowuje użytkownikowi wiek w przedziale 0-25lat. Ta kategoria może oznaczać zawód uczeń/student, spróbujmy więc usunąć ją z analizy.
+
+```{r dec_tree_II}
+
+model.dt_2 <- rpart(Age ~ largePurchase + Gender + Stay_In_Current_City_Years  + Marital_Status  + City_Category, data=d_userInfo.train)
+rpart.plot(model.dt_2, box.palette = "yellow")
+
+```
+  
+Niestety, usunięcie tej zmiennej nie pozwala na interpretację wyniku. Sprawdźmy jeszcze, jaką głębokość optymalnie powinien mieć pierwszy z modeli.
+```{r dec_tree2}
+printcp(model.dt)
+```
+```{r dec_tree3}
+plotcp(model.dt, cex.lab=1.1, cex.axis=1.1)
+```
+  
+Analizując linię przeecięcia wykresu X-val relative error optymalny podział to 2 lub 3 węzły.
+  
+Niestety, powyższy zbiór danych nie jest pomocny w przyporządkowywaniu użytkowników do kategorii wiekowej przy pomocy drzewa decyzyjnego.
+
+###Podsumowanie
+Głównym celem powyższej analizy było zbadanie, jaki konsument dokona zakupów na wysoką kwotę. Zarówno według modelu regresji liniowej, jak i logistycznej dla nowoutworzonej zmiennej, czynnikami nasilniej wpływającymi na wysokość zakupów (lub fakt zrobienia zakupów wyższych niż mediana w grupie) jest płeć konsumenta (mężczyźni wydają więcej) oraz kategoria miasta. Według modelu regresji liniowej, najwyższe zakupy robią osoby z miast kat. A, następnie B i C. Model regresji logistycznej jest zgodny co do kat. C jako miast z użytkownikami z najniższym prawdopodobieństwem zrobienia dużych zakupów, jednak B stawia wyżej niż A.
+
+  
